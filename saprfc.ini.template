@@ -1,0 +1,9 @@
+#RENAME THIS FILE TO sapnwrfc.ini AND FILL IN YOUR CREDENTIALS
+DEST=IRD_SSO
+ASHOST=your_server_address
+SYSNR=your_system_number
+CLIENT=your_client
+SNC_MODE=1
+SNC_PARTNERNAME=p:CN=SAP/KerberosIRD@EC.WIN.COLPAL.COM
+SNC_LIB=C:\Program Files\SAP\FrontEnd\SecureLogin\lib\sapcrypto.dll
+SNC_MYNAME=p:YOUR_CERTIFICATE_STRING_HERE

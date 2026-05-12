@@ -1,0 +1,3 @@
+pandas
+openpyxl
+pyrfc==3.3.0

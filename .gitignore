@@ -1,0 +1,16 @@
+# Python environment
+venv/
+__pycache__/
+*.pyc
+
+# Proprietary SAP SDK (Do NOT upload binaries)
+nwrfcsdk/
+
+# Sensitive Connection Info
+saprfc.ini
+dev_rfc.log
+*.trc
+
+# Output files
+*.xlsx
+*.csv
