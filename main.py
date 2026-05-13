@@ -76,26 +76,28 @@ def run_srss_pipeline(dest_name, site_list, date_from, date_to):
 
         result = conn.call('RFC_READ_TABLE', 
                            QUERY_TABLE='ZSRSS_STOCK_LOG', 
-                           DELIMITER='|',
+                           DELIMITER='^', 
                            OPTIONS=where_clause)
 
         fields = [f['FIELDNAME'] for f in result['FIELDS']]
         raw_rows = result['DATA']
         
         if raw_rows:
-            data = [row['WA'].split('|') for row in raw_rows]
+            data = [row['WA'].split('^')[:len(fields)] for row in raw_rows]
+            
             df = pd.DataFrame(data, columns=fields)
             df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
             
             for col in df.columns:
                 if 'DATE' in col.upper() or 'DAT' in col.upper():
                     df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%m/%d/%Y')
-            
+ 
             ts = datetime.now().strftime('%Y%m%d_%H%M')
             output_file = os.path.join(BASE_DIR, f"SRSS_Extract_{dest_name}_{ts}.xlsx")
             df.to_excel(output_file, index=False)
             
             print(f"\n🏆 SUCCESS: Master File Generated.")
+            print(f"📊 Table Schema: {len(fields)} columns processed.")
             print(f"📈 Total Rows Fetched: {len(df)}")
             print(f"📂 Location: {output_file}")
         else:
@@ -110,7 +112,7 @@ def run_srss_pipeline(dest_name, site_list, date_from, date_to):
 
 if __name__ == "__main__":
     SERVER_DEST = "IR9" 
-    SITES = ["w001"] 
+    SITES = ["enter site codes here"] 
     START = '20260201'
     END   = '20260228'
     
