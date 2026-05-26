@@ -1,121 +1,141 @@
 import streamlit as st
 import pandas as pd
-import os
 import time
+import os
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from main import run_regional_worker, BASE_DIR, SDK_PATH
 
-# ==========================================================
-# 1. SAP SDK & PATH SETUP
-# ==========================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SDK_PATH = os.path.join(BASE_DIR, "nwrfcsdk", "lib")
-INI_PATH = os.path.join(BASE_DIR, "saprfc.ini")
-DIST_FILE = os.path.join(BASE_DIR, "active dist list.xlsx - Sheet1.csv")
+st.set_page_config(page_title="SRSS Global Dashboard", page_icon="🚜", layout="wide")
 
-if os.path.exists(SDK_PATH):
-    os.add_dll_directory(SDK_PATH)
-from pyrfc import Connection
+if not os.path.exists(SDK_PATH):
+    st.error(f"⚠️ SYSTEM WARNING: SAP NWRFC SDK was not detected at: {SDK_PATH}. Please verify your folder setup.")
 
-# ==========================================================
-# 2. DATA PROCESSING: REGIONAL SPLIT
-# ==========================================================
-def load_regional_sites():
-    if not os.path.exists(DIST_FILE):
-        st.error(f"Missing distributor list: {DIST_FILE}")
-        return {}
+def parse_uploaded_file_to_regions(file_buffer):
+    if file_buffer.name.endswith('.xlsx') or file_buffer.name.endswith('.xls'):
+        df = pd.read_excel(file_buffer)
+    else:
+        df = pd.read_csv(file_buffer)
     
-    df = pd.read_csv(DIST_FILE)
-    df['Dist Code'] = df['Dist Code'].astype(str).str.strip()
-    
-    # Map first letter to Region
-    mapping = {'N': 'NORTH', 'S': 'SOUTH', 'E': 'EAST', 'W': 'WEST'}
-    df['Region'] = df['Dist Code'].str[0].map(mapping)
-    
-    regions = {}
-    for r_name in mapping.values():
-        regions[r_name] = df[df['Region'] == r_name]['Dist Code'].tolist()
+    target_col = None
+    for col in df.columns:
+        norm_col = str(col).strip().lower()
+        if 'dist' in norm_col and 'code' in norm_col:
+            target_col = col
+            break
+            
+    if not target_col:
+        target_col = df.columns[0]
+        st.warning(f"⚠️ Header 'Dist Code' not found. Analyzing the first column: **'{target_col}'**")
+
+    clean_series = df[target_col].dropna()
+    all_codes = []
+    for raw_val in clean_series.unique():
+        str_val = str(raw_val).strip().upper()
+        if str_val and str_val not in ['NAN', 'NAT', 'NONE']:
+            all_codes.append(str_val)
+            
+    regions = {
+        "NORTH": [c for c in all_codes if c.startswith('N')],
+        "SOUTH": [c for c in all_codes if c.startswith('S')],
+        "EAST":  [c for c in all_codes if c.startswith('E')],
+        "WEST":  [c for c in all_codes if c.startswith('W')],
+        "MISC":  [c for c in all_codes if not c.startswith(('N', 'S', 'E', 'W'))]
+    }
     return regions
 
-# ==========================================================
-# 3. SAP WORKER (Running in Parallel)
-# ==========================================================
-def run_regional_worker(region_name, dest, sites, start, end):
-    try:
-        # Load config inside worker for process independence
-        from main import get_sap_config # Assuming helper is in main.py
-        sap_params = get_sap_config(dest)
-        conn = Connection(**sap_params)
-        
-        # --- Phase 1: Trigger ---
-        for site in sites:
-            try:
-                conn.call('ZSRSS_RFC_STOCK_UPDATE', IV_DISTRI=site, 
-                          IV_DATE_FR=start, IV_DATE_TO=end, IV_UPDATE='X')
-            except: pass # Ignore UI closures
-            
-        # --- Phase 2: Harvest ---
-        where = []
-        for i, site in enumerate(sites):
-            cond = f"WERKS EQ '{site}'"
-            if i < len(sites) - 1: cond += " OR "
-            where.append({'TEXT': cond})
-
-        result = conn.call('RFC_READ_TABLE', QUERY_TABLE='ZSRSS_STOCK_LOG', 
-                           DELIMITER='^', OPTIONS=where)
-
-        fields = [f['FIELDNAME'] for f in result['FIELDS']]
-        data = [row['WA'].split('^')[:len(fields)] for row in result['DATA']]
-        
-        df_out = pd.DataFrame(data, columns=fields)
-        output_name = f"SRSS_{region_name}_{datetime.now().strftime('%H%M')}.xlsx"
-        df_out.to_excel(output_name, index=False)
-        
-        return True, region_name, len(df_out), output_name
-    except Exception as e:
-        return False, region_name, str(e), None
-
-# ==========================================================
-# 4. STREAMLIT UI
-# ==========================================================
-st.set_page_config(page_title="SRSS Global Automator", layout="wide")
 st.title("🚜 SRSS Global Distribution Automator")
+st.markdown("Run high-throughput parallel regional stock updates and harvests from a centralized cockpit.")
 
-# Load sites once
-REGIONS = load_regional_sites()
+with st.sidebar:    
+    st.header("⚙️ Target Control Configuration")
+    target_sys = st.selectbox("Select Target Environment", ["IRT", "IRD", "IRP"])
+    
+    st.divider()
+    st.subheader("📅 Date Window Configuration")
+    col_a, col_b = st.columns(2)
+    d_start = col_a.date_input("Start Date", datetime(2026, 2, 1))
+    d_end = col_b.date_input("End Date", datetime(2026, 2, 28))
+    
+    st.divider()
+    st.caption("⚡ This interface leverages concurrent multithreading to manage 4 isolated SAP network connections simultaneously.")
 
-with st.sidebar:
-    st.header("Control Panel")
-    target = st.selectbox("Target System", ["IRD", "IRT"])
-    d_start = st.date_input("From", datetime(2026, 2, 1))
-    d_end = st.date_input("To", datetime(2026, 2, 28))
-    
-    selected_regions = st.multiselect("Regions", list(REGIONS.keys()), default=list(REGIONS.keys()))
+uploaded_file = st.file_uploader("Drop your 'active dist list.xlsx' or CSV file here", type=["xlsx", "xls", "csv"])
 
-if st.button("🚀 Start Global Run"):
-    st.info(f"Initiating parallel lanes for {len(selected_regions)} regions...")
+if uploaded_file:
+    with st.spinner("Analyzing data structure and parsing regional lanes..."):
+        REGIONS = parse_uploaded_file_to_regions(uploaded_file)
     
-    start_ts = time.perf_counter()
-    p_bar = st.progress(0)
-    
-    with ProcessPoolExecutor(max_workers=4) as executor:
-        futures = []
-        for r in selected_regions:
-            futures.append(executor.submit(run_regional_worker, r, target, REGIONS[r], 
-                                         d_start.strftime("%Y%m%d"), d_end.strftime("%Y%m%d")))
+    st.subheader("📊 Dynamic Regional Lane Breakdown")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("North Lane", f"{len(REGIONS['NORTH'])} sites")
+    m2.metric("South Lane", f"{len(REGIONS['SOUTH'])} sites")
+    m3.metric("East Lane", f"{len(REGIONS['EAST'])} sites")
+    m4.metric("West Lane", f"{len(REGIONS['WEST'])} sites")
+    m5.metric("Misc / Unmapped", f"{len(REGIONS['MISC'])} sites")
+
+    active_lanes = {name: sites for name, sites in REGIONS.items() if len(sites) > 0 and name != "MISC"}
+
+    st.divider()
+    if st.button("🚀 Launch Parallel Global Execution", type="primary"):
+        global_start_time = time.perf_counter()
         
-        for i, future in enumerate(futures):
-            success, r_name, info, file_path = future.result()
-            if success:
-                st.success(f"✅ {r_name} Finished: {info} rows extracted.")
-                # Show Download Link
-                with open(file_path, "rb") as f:
-                    st.download_button(f"📥 Download {r_name} Excel", f, file_name=file_path)
-            else:
-                st.error(f"❌ {r_name} Failed: {info}")
+        sap_start = d_start.strftime("%Y%m%d")
+        sap_end = d_end.strftime("%Y%m%d")
+        
+        st.subheader("📡 Live Execution Output Streams")
+        
+        with st.status(f"Connecting to SAP {target_sys} and initializing execution lanes...", expanded=True) as status_box:
             
-            p_bar.progress((i + 1) / len(selected_regions))
+            with ThreadPoolExecutor(max_workers=len(active_lanes)) as executor:
+                futures = {
+                    executor.submit(run_regional_worker, name, target_sys, sites, sap_start, sap_end): name
+                    for name, sites in active_lanes.items()
+                }
+                
+                for future in as_completed(futures):
+                    lane_name = futures[future]
+                    try:
+                        result_msg = future.result()
+                        
+                        if "✅" in result_msg:
+                            st.success(result_msg)
+                        elif "⚠️" in result_msg:
+                            st.warning(result_msg)
+                        else:
+                            st.error(result_msg)
+                            
+                    except Exception as exc:
+                        st.error(f"❌ [{lane_name} Lane] Unhandled thread exception: {exc}")
+            
+            status_box.update(label="All Parallel Tasks Completed!", state="complete")
+        
+        global_duration = (time.perf_counter() - global_start_time) / 60
+        st.balloons()
+        st.write(f"⏱️ **Total Processing Pipeline Runtime:** {global_duration:.2f} minutes")
+        
+        st.subheader("📥 Generated Reports Download Hub")
+        st.markdown("Grab your compiled Excel reports directly from the server:")
+        
+        download_cols = st.columns(4)
+        col_idx = 0
+        
+        for file in os.listdir(BASE_DIR):
+            if file.startswith("SRSS_") and file.endswith(".xlsx"):
+                file_path = os.path.join(BASE_DIR, file)
+                if os.path.getmtime(file_path) > (time.time() - 3600):
+                    with open(file_path, "rb") as f:
+                        file_bytes = f.read()
+                    
+                    with download_cols[col_idx % 4]:
+                        st.download_button(
+                            label=f"Download {file.split('_')[1]} Report",
+                            data=file_bytes,
+                            file_name=file,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"dl_{file}"
+                        )
+                    col_idx += 1
 
-    total_time = (time.perf_counter() - start_ts) / 60
-    st.balloons()
-    st.write(f"⏱️ Total Execution Time: {total_time:.2f} minutes")
+else:
+    st.info("💡 To begin processing, please drag and drop or upload your master Distributor List Excel sheet above.")
