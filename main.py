@@ -3,7 +3,7 @@ import sys
 import time
 import pandas as pd
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SDK_PATH = os.path.join(BASE_DIR, "nwrfcsdk", "lib")
@@ -47,31 +47,44 @@ def extract_regions_from_file(filename):
     
     print(f"📡 Reading file: {filename}...")
     
-    if filename.endswith('.xlsx') or filename.endswith('.xls'):
+    if filename.lower().endswith(('.xlsx', '.xls')):
         df = pd.read_excel(file_path)
     else:
-        df = pd.read_csv(file_path)
+        df = None
+        try:
+            df = pd.read_csv(file_path, encoding='utf-8')
+        except Exception:
+            pass
+            
+        if df is None:
+            try:
+                df = pd.read_csv(file_path, encoding='latin-1')
+            except Exception:
+                pass
+                
+        if df is None:
+            try:
+                df = pd.read_csv(file_path, encoding='latin-1', sep=None, engine='python', on_bad_lines='skip')
+                print("⚠️ Resilient fallback parsing applied to bypass CSV layout anomalies.")
+            except Exception as e:
+                print(f"❌ Critical CSV Parsing Failure: {e}")
+                raise e
     
     target_col = None
     for col in df.columns:
         norm_col = str(col).strip().lower()
-        if 'dist' in norm_col and 'code' in norm_col:
+        if any(k in norm_col for k in ['code', 'plant', 'werks', 'site', 'distributor', 'dist']):
             target_col = col
             break
             
     if not target_col:
         target_col = df.columns[0]
-        print(f"⚠️ Could not find exact 'Dist Code' header. Defaulting to first column: '{target_col}'")
-    else:
-        print(f"🎯 Smart-matched distributor column: '{target_col}'")
-
-    clean_series = df[target_col].dropna()
     
+    clean_series = df[target_col].dropna()
     all_codes = []
     for raw_val in clean_series.unique():
-        str_val = str(raw_val).strip().upper()
-        # Skip string representations of null blanks
-        if str_val and str_val != 'NAN' and str_val != 'NAT' and str_val != 'NONE':
+        str_val = str(raw_val).strip().replace('"', '').replace("'", "").upper()
+        if str_val and str_val not in ['NAN', 'NAT', 'NONE']:
             all_codes.append(str_val)
     
     regions = {
@@ -81,31 +94,52 @@ def extract_regions_from_file(filename):
         "WEST":  [c for c in all_codes if c.startswith('W')],
         "MISC":  [c for c in all_codes if not c.startswith(('N', 'S', 'E', 'W'))]
     }
-    
     return regions
 
-def run_regional_worker(region_name, dest_name, site_list, date_from, date_to):
+def run_regional_worker(region_name, dest_name, site_list, date_from, date_to, iv_update='X', stop_event=None):
     start_time = time.perf_counter()
-    print(f"🚀 [{region_name} LANE] Thread started. Processing {len(site_list)} sites...")
+    print(f"🚀 [{region_name} LANE] Lane started. Processing {len(site_list)} sites (IV_UPDATE='{iv_update}')...")
     
     try:
         sap_params = get_sap_config(dest_name)
         conn = Connection(**sap_params)
 
         for site in site_list:
+            if stop_event and stop_event.is_set():
+                try: conn.close()
+                except: pass
+                return f"🛑 [{region_name}] Run aborted by user action."
+
             try:
                 conn.call('ZSRSS_RFC_STOCK_UPDATE', 
                           IV_DISTRI=site, IV_DATE_FR=date_from, 
-                          IV_DATE_TO=date_to, IV_UPDATE='')
+                          IV_DATE_TO=date_to, IV_UPDATE=iv_update)
             except Exception as e:
                 if "RFC_CLOSED" not in str(e) and "rc=6" not in str(e):
-                    print(f"⚠️  [{region_name}] Site {site} warning: {e}")
+                    print(f"⚠️ [{region_name}] Site {site} error warning: {e}")
+
+        if stop_event and stop_event.is_set():
+            try: conn.close()
+            except: pass
+            return f"🛑 [{region_name}] Run aborted prior to ledger data query."
 
         where_clause = []
+        
         for i, site in enumerate(site_list):
-            condition = f"WERKS EQ '{site}'" 
-            if i < len(site_list) - 1: condition += " OR "
+            condition = f"WERKS EQ '{site}'"
+            
+            if i == 0 and len(site_list) > 1:
+                condition = f"( {condition}"
+                
+            if i < len(site_list) - 1: 
+                condition += " OR "
+            elif len(site_list) > 1:
+                condition += " )" 
+                
             where_clause.append({'TEXT': condition})
+            
+        where_clause.append({'TEXT': f" AND FR_DATE EQ '{date_from}'"})
+        where_clause.append({'TEXT': f" AND TO_DATE EQ '{date_to}'"})
 
         result = conn.call('RFC_READ_TABLE', QUERY_TABLE='ZSRSS_STOCK_LOG', 
                            DELIMITER='^', OPTIONS=where_clause)
@@ -128,10 +162,14 @@ def run_regional_worker(region_name, dest_name, site_list, date_from, date_to):
             
             end_time = time.perf_counter()
             duration = (end_time - start_time) / 60
-            conn.close()
+            
+            try: conn.close()
+            except: pass
+            
             return f"✅ [{region_name}] Finished! Rows harvested: {len(df)} | Time taken: {duration:.2f} mins"
         else:
-            conn.close()
+            try: conn.close()
+            except: pass
             return f"⚠️ [{region_name}] Finished! (No records found in ZSRSS_STOCK_LOG)"
             
     except Exception as e:
@@ -139,39 +177,20 @@ def run_regional_worker(region_name, dest_name, site_list, date_from, date_to):
 
 if __name__ == "__main__":
     TARGET_SYSTEM = "IRT"
-    
     INPUT_FILE = "active dist list.xlsx" 
-    
-    START_DATE = "20251001"
-    END_DATE = "20251031"
-    
-    global_start = time.perf_counter()
-    print(f"🏁 Starting Global Parallel Run against {TARGET_SYSTEM} at {datetime.now().strftime('%H:%M:%S')}")
+    START_DATE = "20260201"
+    END_DATE = "20260228"
+    DEFAULT_IV_UPDATE = "X"
     
     try:
-        
         REGIONS = extract_regions_from_file(INPUT_FILE)
-        
-        active_regions = {name: sites for name, sites in REGIONS.items() if len(sites) > 0}
-        
-        for name, sites in active_regions.items():
-            print(f"   📊 Region {name}: Found {len(sites)} sites")
-            
-        print("\n⚡ Initializing Parallel Execution Pool...")
-        
-        with ProcessPoolExecutor(max_workers=len(active_regions)) as executor:
+        active_regions = {k: v for k, v in REGIONS.items() if len(v) > 0 and k != "MISC"}
+        with ThreadPoolExecutor(max_workers=len(active_regions)) as executor:
             futures = [
-                executor.submit(run_regional_worker, name, TARGET_SYSTEM, sites, START_DATE, END_DATE)
+                executor.submit(run_regional_worker, name, TARGET_SYSTEM, sites, START_DATE, END_DATE, DEFAULT_IV_UPDATE)
                 for name, sites in active_regions.items()
             ]
-            
-            for future in futures:
+            for future in as_completed(futures):
                 print(future.result())
-
-        global_end = time.perf_counter()
-        total_duration = (global_end - global_start) / 60
-        print(f"\n🏆 ALL PROCESS LANES FINISHED SUCCESSFULLY")
-        print(f"⏱️ Total Parallel Run Processing Time: {total_duration:.2f} minutes")
-        
     except Exception as e:
-        print(f"\n❌ ORCHESTRATOR CRITICAL FAILURE: {e}")
+        print(f"❌ CLI Error: {e}")
