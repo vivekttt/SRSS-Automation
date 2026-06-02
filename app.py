@@ -60,7 +60,7 @@ st.markdown("Run high-throughput parallel regional stock updates and harvests fr
 
 with st.sidebar:
     st.header("⚙️ Target Control Configuration")
-    target_sys = st.selectbox("Select Target Environment", ["IRT", "IRD"], disabled=st.session_state.is_running)
+    target_sys = st.selectbox("Select Target Environment", ["IRT", "IRD", "IRP"], disabled=st.session_state.is_running)
     
     st.divider()
     st.subheader("📅 Date Window Configuration")
