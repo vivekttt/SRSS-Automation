@@ -74,6 +74,16 @@ with st.sidebar:
     chosen_iv_update = 'X' if iv_update_bool else ''
     st.markdown(f"**Current Status:** Sending `IV_UPDATE = '{chosen_iv_update}'`")
 
+    # Layout criteria configuration switches
+    iv_summary_bool = st.checkbox("Summary Report Format", value=True, disabled=st.session_state.is_running, help="Aggregates structural columns into layout totals.")
+    chosen_iv_summary = 'X' if iv_summary_bool else ' '
+
+    iv_hblock_bool = st.checkbox("Hide Blocked SKUs", value=False, disabled=st.session_state.is_running, help="Leave unchecked to include blocked lines in matrix arrays.")
+    chosen_iv_hblock = 'X' if iv_hblock_bool else ' '
+
+    iv_exzero_bool = st.checkbox("Exclude Zero Stock Records", value=True, disabled=st.session_state.is_running)
+    chosen_iv_exzero = 'X' if iv_exzero_bool else ' '
+
     st.divider()
     
     if st.session_state.is_running:
@@ -118,7 +128,7 @@ if uploaded_file:
             all_found = REGIONS["NORTH"] + REGIONS["SOUTH"] + REGIONS["EAST"] + REGIONS["WEST"] + REGIONS["MISC"]
             st.code(", ".join(all_found[:15]))
         
-        st.subheader("📊 Dynamic Regional Lane Breakdown")
+        st.subheader("📊 Centralized Region Monitor")
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("North Lane", f"{len(REGIONS['NORTH'])} sites")
         m2.metric("South Lane", f"{len(REGIONS['SOUTH'])} sites")
@@ -146,11 +156,23 @@ if uploaded_file:
             
             st.subheader("📡 Live Execution Output Streams")
             
-            with st.status(f"Connecting to SAP {target_sys} (IV_UPDATE='{chosen_iv_update}')...", expanded=True) as status_box:
+            with st.status(f"Connecting to SAP {target_sys}...", expanded=True) as status_box:
                 with ThreadPoolExecutor(max_workers=len(active_lanes)) as executor:
+                    # FIXED: Explicit keyword parameters pass choices safely into the runtime worker logic
                     futures = {
-                        executor.submit(run_regional_worker, name, target_sys, sites, sap_start, sap_end, chosen_iv_update, st.session_state.stop_event): name
-                        for name, sites in active_lanes.items()
+                        executor.submit(
+                            run_regional_worker, 
+                            region_name=name, 
+                            dest_name=target_sys, 
+                            site_list=sites, 
+                            date_from=sap_start, 
+                            date_to=sap_end, 
+                            iv_update=chosen_iv_update, 
+                            iv_summary=chosen_iv_summary, 
+                            iv_hblock=chosen_iv_hblock, 
+                            iv_exzero=chosen_iv_exzero, 
+                            stop_event=st.session_state.stop_event
+                        ): name for name, sites in active_lanes.items()
                     }
                     
                     for future in as_completed(futures):

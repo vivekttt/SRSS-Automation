@@ -96,9 +96,12 @@ def extract_regions_from_file(filename):
     }
     return regions
 
-def run_regional_worker(region_name, dest_name, site_list, date_from, date_to, iv_update='X', stop_event=None):
+def run_regional_worker(region_name, dest_name, site_list, date_from, date_to, 
+                        iv_update='X', iv_summary='X', iv_lpdat=None, 
+                        iv_subtot='CAT', iv_exzero='X', iv_hblock='X', stop_event=None):
+    
     start_time = time.perf_counter()
-    print(f"🚀 [{region_name} LANE] Lane started. Processing {len(site_list)} sites (IV_UPDATE='{iv_update}')...")
+    print(f"🚀 [{region_name} LANE] Lane started. Processing {len(site_list)} sites...")
     
     try:
         sap_params = get_sap_config(dest_name)
@@ -111,31 +114,24 @@ def run_regional_worker(region_name, dest_name, site_list, date_from, date_to, i
                 return f"🛑 [{region_name}] Run aborted by user action."
 
             try:
+                # Updated with new parameters to match FM ZSRSS_RFC_STOCK_UPDATE
                 conn.call('ZSRSS_RFC_STOCK_UPDATE', 
                           IV_DISTRI=site, IV_DATE_FR=date_from, 
-                          IV_DATE_TO=date_to, IV_UPDATE=iv_update)
+                          IV_DATE_TO=date_to, IV_UPDATE=iv_update,
+                          IV_SUMMARY=iv_summary, IV_LPDAT=iv_lpdat,
+                          IV_SUBTOT=iv_subtot, IV_EXZERO=iv_exzero,
+                          IV_HBLOCK=iv_hblock)
             except Exception as e:
                 if "RFC_CLOSED" not in str(e) and "rc=6" not in str(e):
                     print(f"⚠️ [{region_name}] Site {site} error warning: {e}")
 
-        if stop_event and stop_event.is_set():
-            try: conn.close()
-            except: pass
-            return f"🛑 [{region_name}] Run aborted prior to ledger data query."
-
+        # --- Data Harvesting ---
         where_clause = []
-        
         for i, site in enumerate(site_list):
             condition = f"WERKS EQ '{site}'"
-            
-            if i == 0 and len(site_list) > 1:
-                condition = f"( {condition}"
-                
-            if i < len(site_list) - 1: 
-                condition += " OR "
-            elif len(site_list) > 1:
-                condition += " )" 
-                
+            if i == 0 and len(site_list) > 1: condition = f"( {condition}"
+            if i < len(site_list) - 1: condition += " OR "
+            elif len(site_list) > 1: condition += " )" 
             where_clause.append({'TEXT': condition})
             
         where_clause.append({'TEXT': f" AND FR_DATE EQ '{date_from}'"})
@@ -160,34 +156,39 @@ def run_regional_worker(region_name, dest_name, site_list, date_from, date_to, i
             output_file = os.path.join(BASE_DIR, f"SRSS_{region_name}_{ts}.xlsx")
             df.to_excel(output_file, index=False)
             
-            end_time = time.perf_counter()
-            duration = (end_time - start_time) / 60
-            
-            try: conn.close()
-            except: pass
-            
-            return f"✅ [{region_name}] Finished! Rows harvested: {len(df)} | Time taken: {duration:.2f} mins"
+            conn.close()
+            duration = (time.perf_counter() - start_time) / 60
+            return f"✅ [{region_name}] Finished! Rows: {len(df)} | Time: {duration:.2f} mins"
         else:
-            try: conn.close()
-            except: pass
-            return f"⚠️ [{region_name}] Finished! (No records found in ZSRSS_STOCK_LOG)"
+            conn.close()
+            return f"⚠️ [{region_name}] Finished! (No records found)"
             
     except Exception as e:
         return f"❌ [{region_name} CRITICAL FAILURE]: {e}"
 
 if __name__ == "__main__":
-    TARGET_SYSTEM = "IRT"
-    INPUT_FILE = "active dist list.xlsx" 
-    START_DATE = "20260201"
-    END_DATE = "20260228"
-    DEFAULT_IV_UPDATE = "X"
+    TARGET_SYSTEM = "IRP"
+    INPUT_FILE = "Active Dist July 26.xlsx" 
+    START_DATE = "20260701"
+    END_DATE = "20260731"
+    
+    # Configuration Params
+    IV_UPDATE = "X"
+    IV_SUMMARY = " "
+    IV_SUBTOT = "CAT"
+    IV_EXZERO = "X"
+    IV_HBLOCK = " "
+    IV_LPDAT = "20260731" # Pass None if not required, or a string 'YYYYMMDD'
     
     try:
         REGIONS = extract_regions_from_file(INPUT_FILE)
         active_regions = {k: v for k, v in REGIONS.items() if len(v) > 0 and k != "MISC"}
+        
         with ThreadPoolExecutor(max_workers=len(active_regions)) as executor:
             futures = [
-                executor.submit(run_regional_worker, name, TARGET_SYSTEM, sites, START_DATE, END_DATE, DEFAULT_IV_UPDATE)
+                executor.submit(run_regional_worker, name, TARGET_SYSTEM, sites, 
+                                START_DATE, END_DATE, IV_UPDATE, IV_SUMMARY, 
+                                IV_LPDAT, IV_SUBTOT, IV_EXZERO, IV_HBLOCK)
                 for name, sites in active_regions.items()
             ]
             for future in as_completed(futures):

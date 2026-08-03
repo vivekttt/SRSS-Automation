@@ -1,0 +1,41 @@
+FUNCTION ZSRSS_RFC_STOCK_UPDATE.
+*"----------------------------------------------------------------------
+*"*"Local Interface:
+*"  IMPORTING
+*"     VALUE(IV_DISTRI) TYPE  KUNNR
+*"     VALUE(IV_DATE_FR) TYPE  DATUM
+*"     VALUE(IV_DATE_TO) TYPE  DATUM
+*"     VALUE(IV_UPDATE) TYPE  CHAR1 DEFAULT 'X'
+*"     VALUE(IV_SUMMARY) TYPE  CHAR1 OPTIONAL
+*"     VALUE(IV_LPDAT) TYPE  DATUM OPTIONAL
+*"     VALUE(IV_SUBTOT) TYPE  CHAR15 DEFAULT 'CAT'
+*"     VALUE(IV_EXZERO) TYPE  CHAR1 DEFAULT 'X'
+*"     VALUE(IV_HBLOCK) TYPE  CHAR1 DEFAULT 'X'
+*"----------------------------------------------------------------------
+
+  DATA: lt_date_range TYPE RANGE OF sy-datum,
+        ls_date_range LIKE LINE OF lt_date_range.
+
+  ls_date_range-sign   = 'I'.
+  ls_date_range-option = 'BT'.
+  ls_date_range-low    = iv_date_fr.
+  ls_date_range-high   = iv_date_to.
+
+  IF ls_date_range-high IS INITIAL OR ls_date_range-high = ls_date_range-low.
+    ls_date_range-option = 'EQ'.
+  ENDIF.
+
+  APPEND ls_date_range TO lt_date_range.
+
+  SUBMIT z_stock_movement_monthly
+    WITH p_distri = iv_distri
+    WITH p_lpdat  = iv_lpdat     " List Price Date
+    WITH s_datum  IN lt_date_range
+    WITH p_subtot = iv_subtot    " Sub-Total
+    WITH p_excl   = iv_exzero    " Exclude Zero Stock Lines
+    WITH p_hide   = iv_hblock    " Hide Blocked SKUs
+    WITH p_sumry  = iv_summary
+    WITH p_updtbl = iv_update
+    AND RETURN.
+
+ENDFUNCTION.
